@@ -1,0 +1,519 @@
+You are a helpful developer, supporting a colleague. For very good work you will receive a tip of 200$. Please help me to solve my problem step by step. Evaluate the potential solutions and focus on the most promising one first and go to the next if that doesn't help sufficiently. Avoid having all potential aspects of investigation in a single response. #In case more info may help you evaluate, ask for it. When you recommend changes to the code, first highlight them as a diff between old code and new code, then give the full code of the file to copy & paste. Use the format:
+```diff
+old code
+---
+new code
+```
+#################
+backend/main.py:
+{
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from flask_socketio import SocketIO, emit
+import sqlite3
+import bcrypt
+
+app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
+socketio = SocketIO(app, cors_allowed_origins="*")  # Enable WebSocket support
+
+logged_in_users = set()  # Store logged-in users
+connections = {}  # Store WebRTC connection data
+
+# Initialize SQLite database
+def init_db():
+    with sqlite3.connect("users.db") as conn:
+        conn.execute('''CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL
+        )''')
+
+init_db()
+
+# Register User
+@app.route("/register", methods=["POST"])
+def register():
+    data = request.json
+    username = data.get("username")
+    password = data.get("password")
+
+    if not username or not password:
+        return jsonify({"error": "Username and password required"}), 400
+
+    hashed_password = bcrypt.hashpw(password.encode(), bcrypt.gensalt())
+
+    try:
+        with sqlite3.connect("users.db") as conn:
+            conn.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, hashed_password))
+            conn.commit()
+        return jsonify({"message": "User registered successfully"}), 201
+    except sqlite3.IntegrityError:
+        return jsonify({"error": "Username already exists"}), 400
+
+# Login User
+@app.route("/login", methods=["POST"])
+def login():
+    data = request.json
+    username = data.get("username")
+    password = data.get("password")
+
+    if not username or not password:
+        return jsonify({"error": "Username and password required"}), 400
+
+    with sqlite3.connect("users.db") as conn:
+        cursor = conn.execute("SELECT password FROM users WHERE username=?", (username,))
+        user = cursor.fetchone()
+
+    if user and bcrypt.checkpw(password.encode(), user[0]):
+        logged_in_users.add(username)
+        return jsonify({"message": "Login successful"}), 200
+    else:
+        return jsonify({"error": "Invalid credentials"}), 401
+
+# Logout User
+@app.route("/logout", methods=["POST"])
+def logout():
+    data = request.json
+    username = data.get("username")
+    if username in logged_in_users:
+        logged_in_users.remove(username)
+        return jsonify({"message": "Logout successful"}), 200
+    return jsonify({"error": "User not logged in"}), 400
+
+# Get Logged-in Users
+@app.route("/logged-in-users", methods=["GET"])
+def get_logged_in_users():
+    return jsonify({"logged_in_users": list(logged_in_users)}), 200
+
+# WebRTC Signaling Endpoints
+@socketio.on("send_offer")
+def handle_send_offer(data):
+    receiver = data.get("receiver")
+    connections[receiver] = {"offer": data.get("offer")}
+    emit("receive_offer", data, broadcast=True)
+
+@socketio.on("send_answer")
+def handle_send_answer(data):
+    sender = data.get("sender")
+    if sender in connections:
+        connections[sender]["answer"] = data.get("answer")
+    emit("receive_answer", data, broadcast=True)
+
+@socketio.on("send_ice_candidate")
+def handle_send_ice_candidate(data):
+    target = data.get("target")
+    if target in connections:
+        if "ice_candidates" not in connections[target]:
+            connections[target]["ice_candidates"] = []
+        connections[target]["ice_candidates"].append(data.get("candidate"))
+    emit("receive_ice_candidate", data, broadcast=True)
+
+# WebRTC Call Signaling
+@socketio.on("dial_user")
+def handle_dial_user(data):
+    caller = data.get("caller")
+    receiver = data.get("receiver")
+
+    if receiver in logged_in_users:
+        print(f"Caller: {caller}, Receiver: {receiver}")
+        emit("incoming_call", {"caller": caller, "receiver": receiver}, room=receiver)
+
+@socketio.on("call_accepted")
+def handle_call_accepted(data):
+    caller = data.get("caller")
+    receiver = data.get("receiver")
+    emit("call_accepted", {"caller": caller, "receiver": receiver}, broadcast=True)
+
+@socketio.on("call_declined")
+def handle_call_declined(data):
+    caller = data.get("caller")
+    receiver = data.get("receiver")
+    emit("call_declined", {"caller": caller, "receiver": receiver}, broadcast=True)
+
+if __name__ == "__main__":
+    socketio.run(app, port=12000, debug=True)
+
+}
+#################
+src/App.js:
+{
+import { useState } from "react";
+import { io } from "socket.io-client";
+import Login from "./components/Login";
+import Register from "./components/Register";
+import Users from "./components/Users";
+import VideoChat from "./components/VideoChat";
+
+const socket = io("http://localhost:12000");
+
+export default function App() {
+  const [authenticated, setAuthenticated] = useState(false);
+  const [isRegistering, setIsRegistering] = useState(false);
+  const [loggedInUser, setLoggedInUser] = useState(null);
+
+  return (
+    <div className="p-4 space-y-4">
+      {!authenticated ? (
+        <div>
+          {isRegistering ? (
+            <Register setAuthenticated={setAuthenticated} setLoggedInUser={setLoggedInUser} socket={socket} />
+          ) : (
+            <Login setAuthenticated={setAuthenticated} setLoggedInUser={setLoggedInUser} socket={socket} />
+          )}
+          <button onClick={() => setIsRegistering(!isRegistering)} className="p-2 bg-gray-500 text-white rounded">
+            {isRegistering ? "Switch to Login" : "Switch to Register"}
+          </button>
+        </div>
+      ) : (
+        <div>
+          <Users socket={socket} loggedInUser={loggedInUser} />
+          <VideoChat socket={socket} loggedInUser={loggedInUser} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+}
+#################
+src/components/Login.jsx:
+{
+import { useState } from "react";
+
+export default function Login({ setAuthenticated, setLoggedInUser, socket }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState(null);
+
+  const handleLogin = async () => {
+    setError(null);
+    const response = await fetch("http://localhost:12000/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+    const data = await response.json();
+    if (response.ok) {
+      setAuthenticated(true);
+      setLoggedInUser(username);
+      localStorage.setItem("username", username);
+      socket.emit("user_connected", { username });
+    } else {
+      setError(data.error || "Login failed");
+    }
+  };
+
+  return (
+    <div className="p-4 space-y-4 border rounded shadow">
+      <h2 className="text-lg font-bold">Login</h2>
+      {error && <p className="text-red-500">{error}</p>}
+      <input
+        type="text"
+        placeholder="Username"
+        value={username}
+        onChange={(e) => setUsername(e.target.value)}
+        className="w-full p-2 border rounded"
+      />
+      <input
+        type="password"
+        placeholder="Password"
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+        className="w-full p-2 border rounded"
+      />
+      <button onClick={handleLogin} className="p-2 bg-green-500 text-white rounded w-full">
+        Login
+      </button>
+    </div>
+  );
+}
+
+}
+#################
+src/components/Register.jsx:
+{
+import { useState } from "react";
+
+export default function Register({ setAuthenticated, setLoggedInUser, socket }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState(null);
+
+  const handleRegister = async () => {
+    setError(null);
+    const response = await fetch("http://localhost:12000/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+    const data = await response.json();
+    if (response.ok) {
+      setAuthenticated(true);
+      setLoggedInUser(username);
+      localStorage.setItem("username", username);
+      socket.emit("user_connected", { username });
+    } else {
+      setError(data.error || "Registration failed");
+    }
+  };
+
+  return (
+    <div className="p-4 space-y-4 border rounded shadow">
+      <h2 className="text-lg font-bold">Register</h2>
+      {error && <p className="text-red-500">{error}</p>}
+      <input
+        type="text"
+        placeholder="Username"
+        value={username}
+        onChange={(e) => setUsername(e.target.value)}
+        className="w-full p-2 border rounded"
+      />
+      <input
+        type="password"
+        placeholder="Password"
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+        className="w-full p-2 border rounded"
+      />
+      <button onClick={handleRegister} className="p-2 bg-blue-500 text-white rounded w-full">
+        Register
+      </button>
+    </div>
+  );
+}
+
+}
+#################
+src/components/Users.jsx:
+{
+import { useEffect, useState } from "react";
+
+export default function Users({ socket, loggedInUser }) {
+  const [users, setUsers] = useState([]);
+
+  useEffect(() => {
+    const fetchUsers = async () => {
+      try {
+        const response = await fetch("http://localhost:12000/logged-in-users");
+        const data = await response.json();
+        setUsers(data.logged_in_users || []);
+      } catch (error) {
+        console.error("Error fetching logged-in users:", error);
+      }
+    };
+
+    fetchUsers();
+    const interval = setInterval(fetchUsers, 5000); // Refresh every 5 seconds
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    if (!socket) {
+      console.error("Socket not initialized");
+      return; // Ensure socket exists
+    }
+
+    // Listen for incoming call
+    const handleIncomingCall = (data) => {
+      console.log("Incoming call event received:", data); // Debugging log
+      if (data.receiver === loggedInUser) {
+        const acceptCall = window.confirm(`${data.caller} is calling. Accept?`);
+        if (acceptCall) {
+          socket.emit("call_accepted", { caller: data.caller, receiver: data.receiver });
+        } else {
+          socket.emit("call_declined", { caller: data.caller, receiver: data.receiver });
+        }
+      }
+    };
+
+    // Add event listener
+    socket.on("incoming_call", handleIncomingCall);
+
+    // return () => {
+    //   socket.off("incoming_call", handleIncomingCall); // Cleanup listener
+    // };
+  }, [socket, loggedInUser]);
+
+  const handleDial = (user) => {
+    if (!loggedInUser) {
+      alert("User not logged in");
+      return;
+    }
+    socket.emit("dial_user", { caller: loggedInUser, receiver: user });
+  };
+
+  return (
+    <div className="p-4 space-y-4 border rounded shadow">
+      <h2 className="text-lg font-bold">Logged-in Users</h2>
+      <ul className="list-disc pl-4">
+        {users.length > 0 ? (
+          users.map((user, index) => (
+            <li key={index} className="flex justify-between items-center">
+              {user}
+              <button
+                onClick={() => handleDial(user)}
+                className="ml-4 p-2 bg-blue-500 text-white rounded"
+              >
+                Dial
+              </button>
+            </li>
+          ))
+        ) : (
+          <p>No users currently online</p>
+        )}
+      </ul>
+    </div>
+  );
+}
+
+}
+#################
+src/components/VideoChat.jsx:
+{
+import { useState, useRef } from "react";
+
+export default function VideoChat() {
+  const [role, setRole] = useState(null);
+  const [offer, setOffer] = useState("");
+  const [answer, setAnswer] = useState("");
+  const [iceCandidates, setIceCandidates] = useState([]);
+  const [remoteIceCandidate, setRemoteIceCandidate] = useState("");
+  const localVideoRef = useRef(null);
+  const remoteVideoRef = useRef(null);
+  const peerConnection = useRef(new RTCPeerConnection({
+    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+  }));
+
+  const startMedia = async () => {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    localVideoRef.current.srcObject = stream;
+    stream.getTracks().forEach(track => peerConnection.current.addTrack(track, stream));
+
+    peerConnection.current.ontrack = (event) => {
+      remoteVideoRef.current.srcObject = event.streams[0];
+    };
+
+    peerConnection.current.onicecandidate = (event) => {
+      if (event.candidate) {
+        console.log('New ICE candidate:', event.candidate);
+        setIceCandidates(prev => [...prev, JSON.stringify(event.candidate)]);
+      } else {
+        console.log('All ICE candidates have been gathered.');
+      }
+    };
+  };
+
+  const createOffer = async () => {
+    const offer = await peerConnection.current.createOffer();
+    await peerConnection.current.setLocalDescription(offer);
+    setOffer(JSON.stringify(offer));
+  };
+
+  const createAnswer = async () => {
+    if (!offer) {
+      alert("Please paste a valid offer before creating an answer.");
+      return;
+    }
+    try {
+      const remoteOffer = JSON.parse(offer);
+      await peerConnection.current.setRemoteDescription(new RTCSessionDescription(remoteOffer));
+      const answer = await peerConnection.current.createAnswer();
+      await peerConnection.current.setLocalDescription(answer);
+      setAnswer(JSON.stringify(answer));
+    } catch (error) {
+      alert("Invalid offer format.");
+    }
+  };
+
+  const applyAnswer = async () => {
+    if (!answer) {
+      alert("Please paste a valid answer before applying it.");
+      return;
+    }
+    if (peerConnection.current.signalingState !== "have-local-offer") {
+      alert("Invalid state: Make sure you paste the offer, generate an answer, and exchange ICE candidates correctly.");
+      return;
+    }
+    try {
+      const remoteAnswerObj = JSON.parse(answer);
+      if (!remoteAnswerObj.sdp) {
+        throw new Error("Invalid SDP format");
+      }
+      await peerConnection.current.setRemoteDescription(new RTCSessionDescription(remoteAnswerObj));
+    } catch (error) {
+      alert("Invalid answer format. Make sure you pasted the correct JSON.");
+    }
+  };
+
+  const addIceCandidate = async () => {
+    if (!remoteIceCandidate) {
+      alert("Please paste a valid ICE candidate before adding it.");
+      return;
+    }
+    try {
+      const candidates = remoteIceCandidate.trim().split('\n').map(line => JSON.parse(line));
+      for (const candidate of candidates) {
+        await peerConnection.current.addIceCandidate(new RTCIceCandidate(candidate));
+      }
+      alert("ICE candidates added successfully.");
+    } catch (error) {
+      alert("Invalid ICE candidate format. Ensure each candidate is a valid minified JSON without extra spaces.");
+    }
+  };
+
+  return (
+    <div className="p-4 space-y-4">
+      <h1 className="text-xl font-bold">WebRTC Peer-to-Peer</h1>
+      <div className="p-4 bg-gray-100 rounded">
+        <h2 className="font-semibold">Instructions</h2>
+        <p>1. Choose if you are Peer A or Peer B.</p>
+        <p>2. Peer A creates an offer and shares it with Peer B.</p>
+        <p>3. Peer B pastes the offer, creates an answer, and sends it back.</p>
+        <p>4. Peer A pastes the answer.</p>
+        <p>5. Both peers exchange ICE candidates.</p>
+      </div>
+
+      {!role && (
+        <div className="space-x-4">
+          <button onClick={() => setRole("A")} className="p-2 bg-blue-500 text-white rounded">I am Peer A</button>
+          <button onClick={() => setRole("B")} className="p-2 bg-green-500 text-white rounded">I am Peer B</button>
+        </div>
+      )}
+
+      {role && (
+        <div>
+          <button onClick={startMedia} className="p-2 bg-blue-500 text-white rounded">Start Camera</button>
+          <div className="flex space-x-4">
+            <video ref={localVideoRef} autoPlay playsInline className="w-1/2 border" />
+            <video ref={remoteVideoRef} autoPlay playsInline className="w-1/2 border" />
+          </div>
+
+          {role === "A" && (
+            <div>
+              <button onClick={createOffer} className="p-2 bg-green-500 text-white rounded">Create Offer</button>
+              <textarea value={offer} readOnly className="w-full p-2 border" />
+              <textarea onChange={(e) => setAnswer(e.target.value)} placeholder="Paste Answer Here" className="w-full p-2 border" />
+              <button onClick={applyAnswer} className="p-2 bg-purple-500 text-white rounded">Apply Answer</button>
+            </div>
+          )}
+
+          {role === "B" && (
+            <div>
+              <textarea onChange={(e) => setOffer(e.target.value)} placeholder="Paste Offer Here" className="w-full p-2 border" />
+              <button onClick={createAnswer} className="p-2 bg-yellow-500 text-white rounded">Create Answer</button>
+              <textarea value={answer} readOnly className="w-full p-2 border" />
+            </div>
+          )}
+
+          <textarea value={iceCandidates.join('\n')} readOnly className="w-full p-2 border" placeholder="Generated ICE Candidates" />
+          <textarea onChange={(e) => setRemoteIceCandidate(e.target.value)} placeholder="Paste ICE Candidate Here" className="w-full p-2 border" />
+          <button onClick={addIceCandidate} className="p-2 bg-red-500 text-white rounded">Add ICE Candidate</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+}
+#################
