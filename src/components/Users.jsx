@@ -16,7 +16,7 @@ export default function Users({ socket, loggedInUser }) {
     };
 
     fetchUsers();
-    const interval = setInterval(fetchUsers, 10000); // Refresh every 5 seconds
+    const interval = setInterval(fetchUsers, 30000); // Refresh every 30 seconds
     return () => clearInterval(interval);
   }, []);
 
