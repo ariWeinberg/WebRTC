@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify
+from colorama import Fore, Style
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 import sqlite3
@@ -10,7 +11,6 @@ socketio = SocketIO(app, cors_allowed_origins="*")  # Enable WebSocket support
 
 logged_in_users = set()  # Store logged-in users
 connections = {}  # Store WebRTC connection data
-
 user_connections = {}  # Store user connections
 
 # Initialize SQLite database
@@ -23,6 +23,58 @@ def init_db():
         )''')
 
 init_db()
+
+
+def emit_to_user(user_id, event, data, *args, **nargs):
+    if user_id in user_connections:
+        # print(f"Emitting {event} to {user_id} | Data: {data}")  # Debug log
+        emit(event, data, to=user_connections[user_id], *args, **nargs)
+    else:
+        print(f"User {user_id} not found in user_connections")
+
+def get_username_from_sid(sid):
+    for username, user_sid in user_connections.items():
+        if user_sid == sid:
+            return username
+    return None
+
+
+def log_event(sender, recipient, event_type, data, sid, *args, **kwargs):
+    event_direction = 0
+    if sender == get_username_from_sid(request.sid):
+        event_direction = 1
+    elif recipient == get_username_from_sid(request.sid):
+        event_direction = 2
+
+
+    max_length = 25
+
+    full_sender = str(sender)
+    full_recipient = str(recipient)
+    full_event_type = str(event_type)
+    full_data = str(data)
+    full_sid = str(sid)
+    full_args = str(args)
+    full_kwargs = str(kwargs)
+
+
+    sender = str(sender)[0:max_length] + ("..." if len(str(sender)) > max_length else "")
+    recipient = str(recipient)[0:max_length] + ("..." if len(str(recipient)) > max_length else "")
+    event_type = str(event_type)[0:max_length] + ("..." if len(str(event_type)) > max_length else "")
+    data = str(data)[0:max_length] + ("..." if len(str(data)) > max_length else "")
+    sid = str(sid)[0:max_length] + ("..." if len(str(sid)) > max_length else "")
+    args = str(args)[0:max_length] + ("..." if len(str(args)) > max_length else "")
+    kwargs = str(kwargs)[0:max_length] + ("..." if len(str(kwargs)) > max_length else "")
+
+    print(f"{Fore.LIGHTCYAN_EX} Received a{Style.RESET_ALL} {Fore.YELLOW}{event_type}{Style.RESET_ALL}{Fore.LIGHTCYAN_EX} event{Style.RESET_ALL} | \
+{Fore.LIGHTCYAN_EX}call direction:{Style.RESET_ALL} {Fore.GREEN}{sender} -> {recipient}{Style.RESET_ALL} | \
+{Fore.LIGHTCYAN_EX}event direction:{Style.RESET_ALL} {Fore.GREEN}{sender} {(event_direction == 1 and '->') or (event_direction == 2 and '<-') or 'Unknown'} {recipient}{Style.RESET_ALL} | \
+{Fore.LIGHTCYAN_EX}SID:{Style.RESET_ALL} {Fore.GREEN}{sid}{Style.RESET_ALL} | \
+{Fore.LIGHTCYAN_EX}Data:{Style.RESET_ALL} {Fore.GREEN}{data}{Style.RESET_ALL} | \
+{Fore.LIGHTCYAN_EX}Args:{Style.RESET_ALL}{Fore.GREEN} {args}{Style.RESET_ALL} | \
+{Fore.LIGHTCYAN_EX}KaArgs:{Style.RESET_ALL}{Fore.GREEN} {kwargs}{Style.RESET_ALL}")  # Debug log
+
+
 
 # Register User
 @app.route("/register", methods=["POST"])
@@ -79,82 +131,70 @@ def logout():
 def get_logged_in_users():
     return jsonify({"logged_in_users": list(logged_in_users)}), 200
 
-
-
-def emit_to_user(user_id, event, data, *args, **nargs):
-    if user_id in user_connections:
-        print(f"Emitting {event} to {user_id} | Data: {data}")  # Debug log
-        emit(event, data, to=user_connections[user_id], *args, **nargs)
-    else:
-        print(f"User {user_id} not found in user_connections")
-
-def get_username_from_sid(sid):
-    for username, user_sid in user_connections.items():
-        if user_sid == sid:
-            return username
-    return None
-
 # WebRTC Signaling Endpoints
 @socketio.on("send_offer")
-def handle_send_offer(data, *args):
+def handle_send_offer(data, *args, **kwargs):
     callee = data.get("callee")
-    print(f"rscived send_offer event | sender: {get_username_from_sid(request.sid)} | Data: {data}")  # Debug log
+    caller = data.get("caller")
+    # print(f"Received send_offer event | sender: {get_username_from_sid(request.sid)} | Data: {data}")  # Debug log
+
+    log_event(caller, callee, "send_offer", data, request.sid, *args, **kwargs)
+
     connections[callee] = {"offer": data.get("offer")}
-    emit_to_user( callee, "receive_offer", {"caller": data.get("caller"), "callee": data.get("callee"), "offer": data.get("offer")}, broadcast=True)
+    emit_to_user(callee, "receive_offer", {"caller": data.get("caller"), "callee": data.get("callee"), "offer": data.get("offer")}, broadcast=True)
 
 @socketio.on("send_answer")
-def handle_send_answer(data, *args):
-    print(f"Received send_answer event | sender: {get_username_from_sid(request.sid)} | Data: {data}")  # Debug log
+def handle_send_answer(data, *args, **kwargs):
+    # print(f"Received send_answer event | sender: {get_username_from_sid(request.sid)} | Data: {data}")  # Debug log
     caller = data.get("caller")
+    callee = data.get("callee")
+    log_event(caller, callee, "send_answer", data, request.sid, *args, **kwargs)
     if caller in connections:
         connections[caller]["answer"] = data.get("answer")
-
-    emit_to_user( caller, "receive_answer", data, broadcast=True)
-
-@socketio.on("send_ice_candidate")
-def handle_send_ice_candidate(data, *args):
-    print(f"Received send_ice_candidate event | sender: {get_username_from_sid(request.sid)} | Data: {data}")  # Debug log
-    target = data.get("target")
-    if target in connections:
-        if "ice_candidates" not in connections[target]:
-            connections[target]["ice_candidates"] = []
-        connections[target]["ice_candidates"].append(data.get("candidate"))
-    emit("receive_ice_candidate", data, broadcast=True)
+    emit_to_user(caller, "receive_answer", data, broadcast=True)
 
 # WebRTC Call Signaling
 @socketio.on("dial_user")
-def handle_dial_user(data, *args):
+def handle_dial_user(data, *args, **kwargs):
     caller = data.get("caller")
     callee = data.get("callee")
 
-    print(f"Received dial_user event: {caller} -> {callee} | SID: {request.sid} | Args: {args}")  # Debug log
+    log_event(caller, callee, "dial_user", data, request.sid, *args, **kwargs)
 
     if callee in logged_in_users:
         print(f"Emitting incoming_call to: {callee}")  # Debug log
         emit_to_user(callee, "incoming_call", {"caller": caller, "callee": callee})
     else:
-        print(f"Receiver {callee} not found in logged_in_users")  # Debugging missing users
+        print(f"Receiver {callee} not found in logged_in_users")
 
 @socketio.on("call_accepted")
-def handle_call_accepted(data, *args):
+def handle_call_accepted(data, *args, **kwargs):
     caller = data.get("caller")
     callee = data.get("callee")
-    print(f"Received call_accepted event: {caller} -> {callee}")
+    
+    log_event(caller, callee, "call_accepted", data, request.sid, *args, **kwargs)
     emit_to_user(caller, "call_accepted", {"caller": caller, "callee": callee}, broadcast=True)
 
 @socketio.on("call_declined")
-def handle_call_declined(data, *args):
+def handle_call_declined(data, *args, **kwargs):
     caller = data.get("caller")
     receiver = data.get("receiver")
-    print(f"Received call_declined event: {caller} -> {receiver}")
+    # print(f"Received call_declined event: {caller} -> {receiver}")
+    log_event(caller, receiver, "call_declined", data, request.sid, *args, **kwargs)
     emit_to_user(caller, "call_declined", {"caller": caller, "receiver": receiver}, broadcast=True)
 
+@socketio.on("send_ice_candidate")
+def handle_send_ice_candidate(data, *args, **kwargs):
+    callee = data.get("callee")
+    #print(f"sending ICE candidate {get_username_from_sid(request.sid)} -> {callee} | Data: {data}")
+    log_event(get_username_from_sid(request.sid), callee, "send_ice_candidate", data, request.sid, *args, **kwargs)
+    emit_to_user(callee, "receive_ice_candidate", data)
+
 @socketio.on("user_connected")
-def handle_connect(data, *args):
+def handle_connect(data, *args, **kwargs):
     username = data.get("username")
     print(f"Client connected: {request.sid}: username: {username}")  # Debug log
     user_connections[username] = request.sid
-
     print(f"User connections updated: {user_connections}")  # Debug log
 
 if __name__ == "__main__":
