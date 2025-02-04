@@ -1,10 +1,10 @@
 import { useState, useEffect, useRef } from "react";
 
 export default function VideoChat({socket, loggedInUser}) {
-  const [offer, setOffer] = useState("");
   const [iceCandidates, setIceCandidates] = useState([]);
   const localVideoRef = useRef(null);
-  const remoteVideoRef = useRef(null);
+    const [remoteIceCandidate, setRemoteIceCandidate] = useState("");
+    const remoteVideoRef = useRef(null);
   const peerConnection = useRef(new RTCPeerConnection({
     iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
   }));
@@ -12,26 +12,47 @@ export default function VideoChat({socket, loggedInUser}) {
   useEffect(() => {
     if (!socket) return;
 
-    const handleReceiveOffer = (data) => {
-      if (data.receiver === loggedInUser) {
+    const handleReceiveOffer = async (data) => {
         console.log("receive_offer event received:", data);
-        socket.emit("send_answer", { sender: loggedInUser, answer: generateAnswer(data.offer) });
-      }
+        socket.emit("send_answer", { "caller": data["caller"], "callee": data["callee"], answer: JSON.stringify( await generateAnswer(data)) });
     };
 
     const handleReceiveAnswer = (data) => {
-      if (data.sender === loggedInUser) {
         console.log("receive_answer event received:", data);
-        const remoteAnswer = JSON.parse(data.answer);
-        peerConnection.current.setRemoteDescription(new RTCSessionDescription(remoteAnswer));
-      }
+
+        if (!data.answer) {
+          console.error("Received null or undefined answer:", data);
+          return;
+        }
+
+        let remoteAnswer;
+        try {
+          remoteAnswer = JSON.parse(data.answer);
+          if (!remoteAnswer.type || !remoteAnswer.sdp) {
+            throw new Error("Invalid RTCSessionDescription format");
+          }
+          peerConnection.current.setRemoteDescription(new RTCSessionDescription(remoteAnswer));
+        } catch (error) {
+          console.error("Error parsing or setting remote description:", error, data.answer);
+        }
+
+
     };
 
-    const handleAcceptedCall = (data) => {
-      if (data.receiver === loggedInUser && data.caller === loggedInUser) {
+    const handleAcceptedCall = async (data) => {
         console.log("Call accepted event received:", data);
-        createOffer();
-      }
+        let _offer = await createOffer();
+        console.log("Offer created and returned:" + _offer);
+        await socket.emit("send_offer", { "caller": data.caller, "callee": data.callee, "offer": _offer});
+    };
+
+    const handleLocalIceCandidate = (event) => {
+        if (event.candidate) {
+            console.log('New ICE candidate:', event.candidate);
+            socket.emit("send_ice_candidate", { "callee": loggedInUser, "candidate": JSON.stringify(event.candidate) });
+        } else {
+            console.log('All ICE candidates have been gathered.');
+        }
     };
 
     socket.on("receive_offer", handleReceiveOffer);
@@ -50,46 +71,55 @@ export default function VideoChat({socket, loggedInUser}) {
     stream.getTracks().forEach(track => peerConnection.current.addTrack(track, stream));
 
     peerConnection.current.ontrack = (event) => {
-      remoteVideoRef.current.srcObject = event.streams[0];
+        remoteVideoRef.current.srcObject = event.streams[0];
     };
 
     peerConnection.current.onicecandidate = (event) => {
-      if (event.candidate) {
+        if (event.candidate) {
         console.log('New ICE candidate:', event.candidate);
         setIceCandidates(prev => [...prev, JSON.stringify(event.candidate)]);
-      }
+        } else {
+        console.log('All ICE candidates have been gathered.');
+        }
     };
-  };
+    };
 
   const createOffer = async () => {
     const offer = await peerConnection.current.createOffer();
     await peerConnection.current.setLocalDescription(offer);
     console.log("Offer created:", offer);
-    socket.emit("send_offer", { receiver: loggedInUser, offer });
-  };
-
-  const createAnswer = async () => {
-    if (!offer) return;
-    const remoteOffer = JSON.parse(offer);
-    await peerConnection.current.setRemoteDescription(new RTCSessionDescription(remoteOffer));
-    const answer = await peerConnection.current.createAnswer();
-    await peerConnection.current.setLocalDescription(answer);
-
-    console.log("Answer created:", answer);
-    socket.emit("send_answer", { sender: loggedInUser, answer });
+    return JSON.stringify(offer);
   };
 
   const generateAnswer = async (_offer) => {
-    if (!_offer) return;
-    const remoteOffer = JSON.parse(_offer);
+    try {
+      console.log("Generating answer for offer:", _offer["offer"]);
+    const remoteOffer = JSON.parse(_offer["offer"]);
     await peerConnection.current.setRemoteDescription(new RTCSessionDescription(remoteOffer));
-    const answer = await peerConnection.current.createAnswer();
+    var answer = await peerConnection.current.createAnswer();
     await peerConnection.current.setLocalDescription(answer);
-
+    }
+    catch (error) {
+      console.error("Error generating answer:", error);
+    }
     console.log("Answer created:", answer);
-    return JSON.stringify(answer);
+    return answer;
   };
-
+  const addIceCandidate = async () => {
+    if (!remoteIceCandidate) {
+        alert("Please paste a valid ICE candidate before adding it.");
+        return;
+    }
+    try {
+        const candidates = remoteIceCandidate.trim().split('\n').map(line => JSON.parse(line));
+        for (const candidate of candidates) {
+        await peerConnection.current.addIceCandidate(new RTCIceCandidate(candidate));
+        }
+        alert("ICE candidates added successfully.");
+    } catch (error) {
+        alert("Invalid ICE candidate format. Ensure each candidate is a valid minified JSON without extra spaces.");
+    }
+    };
   return (
     <div className="p-4 space-y-4">
       <h1 className="text-xl font-bold">Video Chat</h1>
@@ -97,6 +127,10 @@ export default function VideoChat({socket, loggedInUser}) {
       <div className="flex space-x-4">
         <video ref={localVideoRef} autoPlay playsInline className="w-1/2 border" />
         <video ref={remoteVideoRef} autoPlay playsInline className="w-1/2 border" />
+
+        <textarea value={iceCandidates.join('\n')} readOnly className="w-full p-2 border" placeholder="Generated ICE Candidates" />
+        <textarea onChange={(e) => setRemoteIceCandidate(e.target.value)} placeholder="Paste ICE Candidate Here" className="w-full p-2 border" />
+        <button onClick={addIceCandidate} className="p-2 bg-red-500 text-white rounded">Add ICE Candidate</button>
       </div>
     </div>
   );

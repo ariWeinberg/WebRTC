@@ -11,6 +11,8 @@ socketio = SocketIO(app, cors_allowed_origins="*")  # Enable WebSocket support
 logged_in_users = set()  # Store logged-in users
 connections = {}  # Store WebRTC connection data
 
+user_connections = {}  # Store user connections
+
 # Initialize SQLite database
 def init_db():
     with sqlite3.connect("users.db") as conn:
@@ -77,23 +79,41 @@ def logout():
 def get_logged_in_users():
     return jsonify({"logged_in_users": list(logged_in_users)}), 200
 
+
+
+def emit_to_user(user_id, event, data, *args, **nargs):
+    if user_id in user_connections:
+        print(f"Emitting {event} to {user_id} | Data: {data}")  # Debug log
+        emit(event, data, to=user_connections[user_id], *args, **nargs)
+    else:
+        print(f"User {user_id} not found in user_connections")
+
+def get_username_from_sid(sid):
+    for username, user_sid in user_connections.items():
+        if user_sid == sid:
+            return username
+    return None
+
 # WebRTC Signaling Endpoints
 @socketio.on("send_offer")
-def handle_send_offer(data):
-    receiver = data.get("receiver")
-    print(f"Received send_offer event for {receiver}")  # Debug log
-    connections[receiver] = {"offer": data.get("offer")}
-    emit("receive_offer", {"sender": data.get("receiver"), "offer": data.get("offer")}, broadcast=True)
+def handle_send_offer(data, *args):
+    callee = data.get("callee")
+    print(f"rscived send_offer event | sender: {get_username_from_sid(request.sid)} | Data: {data}")  # Debug log
+    connections[callee] = {"offer": data.get("offer")}
+    emit_to_user( callee, "receive_offer", {"caller": data.get("caller"), "callee": data.get("callee"), "offer": data.get("offer")}, broadcast=True)
 
 @socketio.on("send_answer")
-def handle_send_answer(data):
-    sender = data.get("sender")
-    if sender in connections:
-        connections[sender]["answer"] = data.get("answer")
-    emit("receive_answer", data, broadcast=True)
+def handle_send_answer(data, *args):
+    print(f"Received send_answer event | sender: {get_username_from_sid(request.sid)} | Data: {data}")  # Debug log
+    caller = data.get("caller")
+    if caller in connections:
+        connections[caller]["answer"] = data.get("answer")
+
+    emit_to_user( caller, "receive_answer", data, broadcast=True)
 
 @socketio.on("send_ice_candidate")
-def handle_send_ice_candidate(data):
+def handle_send_ice_candidate(data, *args):
+    print(f"Received send_ice_candidate event | sender: {get_username_from_sid(request.sid)} | Data: {data}")  # Debug log
     target = data.get("target")
     if target in connections:
         if "ice_candidates" not in connections[target]:
@@ -103,31 +123,39 @@ def handle_send_ice_candidate(data):
 
 # WebRTC Call Signaling
 @socketio.on("dial_user")
-def handle_dial_user(data):
+def handle_dial_user(data, *args):
     caller = data.get("caller")
-    receiver = data.get("receiver")
+    callee = data.get("callee")
 
-    print(f"Received dial_user event: {caller} -> {receiver}")  # Debug log
+    print(f"Received dial_user event: {caller} -> {callee} | SID: {request.sid} | Args: {args}")  # Debug log
 
-    if receiver in logged_in_users:
-        print(f"Emitting incoming_call to: {receiver}")  # Debug log
-        emit("incoming_call", {"caller": caller, "receiver": receiver}, broadcast=True)  # Make sure it's being sent
+    if callee in logged_in_users:
+        print(f"Emitting incoming_call to: {callee}")  # Debug log
+        emit_to_user(callee, "incoming_call", {"caller": caller, "callee": callee})
     else:
-        print(f"Receiver {receiver} not found in logged_in_users")  # Debugging missing users
+        print(f"Receiver {callee} not found in logged_in_users")  # Debugging missing users
 
 @socketio.on("call_accepted")
-def handle_call_accepted(data):
+def handle_call_accepted(data, *args):
     caller = data.get("caller")
-    receiver = data.get("receiver")
-    print(f"Received call_accepted event: {caller} -> {receiver}")
-    emit("call_accepted", {"caller": caller, "receiver": receiver}, broadcast=True)
+    callee = data.get("callee")
+    print(f"Received call_accepted event: {caller} -> {callee}")
+    emit_to_user(caller, "call_accepted", {"caller": caller, "callee": callee}, broadcast=True)
 
 @socketio.on("call_declined")
-def handle_call_declined(data):
+def handle_call_declined(data, *args):
     caller = data.get("caller")
     receiver = data.get("receiver")
     print(f"Received call_declined event: {caller} -> {receiver}")
-    emit("call_declined", {"caller": caller, "receiver": receiver}, broadcast=True)
+    emit_to_user(caller, "call_declined", {"caller": caller, "receiver": receiver}, broadcast=True)
+
+@socketio.on("user_connected")
+def handle_connect(data, *args):
+    username = data.get("username")
+    print(f"Client connected: {request.sid}: username: {username}")  # Debug log
+    user_connections[username] = request.sid
+
+    print(f"User connections updated: {user_connections}")  # Debug log
 
 if __name__ == "__main__":
     socketio.run(app, port=12000, debug=True)

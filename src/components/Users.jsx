@@ -25,9 +25,7 @@ export default function Users({ socket, loggedInUser }) {
 
     const handleIncomingCall = (data) => {
       console.log("Incoming call event received:", data);
-      if (data.receiver === loggedInUser) {
         setIncomingCall(data);
-      }
     };
 
     socket.on("incoming_call", handleIncomingCall);
@@ -39,16 +37,13 @@ export default function Users({ socket, loggedInUser }) {
       alert("User not logged in");
       return;
     }
-    socket.emit("dial_user", { caller: loggedInUser, receiver: user });
+    socket.emit("dial_user", {caller: loggedInUser, callee: user });
   };
 
   const handleAcceptCall = () => {
     if (incomingCall) {
-      socket.emit("call_accepted", { caller: incomingCall.caller, receiver: incomingCall.receiver });
+      socket.emit("call_accepted", { caller: incomingCall.caller, callee: incomingCall.callee});
       setIncomingCall(null);
-
-      // Start WebRTC process (offer -> answer -> ICE candidates)
-      socket.emit("send_offer", { receiver: incomingCall.caller });
     }
   };
 
